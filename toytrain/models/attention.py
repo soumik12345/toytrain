@@ -22,17 +22,27 @@ class MultiHeadAttention(nnx.Module):
         self.k_dim = k_dim if k_dim is not None else model_dim
         self.v_dim: float = v_dim if v_dim is not None else model_dim
 
-        self.q_projection = nnx.Linear(
-            model_dim, model_dim, use_bias=False, dtype=dtype, rngs=rngs
-        )
-        self.k_projection = nnx.Linear(
-            self.k_dim, model_dim, use_bias=False, dtype=dtype, rngs=rngs
-        )
-        self.v_projection = nnx.Linear(
-            self.v_dim, model_dim, use_bias=False, dtype=dtype, rngs=rngs
-        )
+        if self.k_dim == self.model_dim and self.v_dim == self.model_dim:
+            self.qkv_projection = nnx.Linear(
+                self.model_dim,
+                3 * self.model_dim,
+                use_bias=False,
+                dtype=dtype,
+                rngs=rngs,
+            )
+        else:
+            self.q_projection = nnx.Linear(
+                self.model_dim, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
+            )
+            self.k_projection = nnx.Linear(
+                self.k_dim, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
+            )
+            self.v_projection = nnx.Linear(
+                self.v_dim, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
+            )
+
         self.out_projection = nnx.Linear(
-            model_dim, model_dim, use_bias=False, dtype=dtype, rngs=rngs
+            self.model_dim, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
         )
         self.dropout = nnx.Dropout(dropout_proba, rngs=rngs)
 
@@ -63,9 +73,13 @@ class MultiHeadAttention(nnx.Module):
     ]:
         query_length = x.shape[1]
 
-        q = self.q_projection(x)
-        k = self.k_projection(x)
-        v = self.v_projection(x)
+        if self.k_dim == self.model_dim and self.v_dim == self.model_dim:
+            qkv = self.qkv_projection(x)
+            q, k, v = jnp.split(qkv, 3, axis=-1)
+        else:
+            q = self.q_projection(x)
+            k = self.k_projection(x)
+            v = self.v_projection(x)
 
         # (B, T, C) -> (B, H, T, D)
         q = self.split_heads(q, query_length)
