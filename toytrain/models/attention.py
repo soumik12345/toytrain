@@ -1,6 +1,7 @@
 import jax.numpy as jnp
+from beartype import beartype
 from flax import nnx
-from jaxtyping import Array
+from jaxtyping import Array, Bool, Float, jaxtyped
 
 
 class MultiHeadAttention(nnx.Module):
@@ -40,15 +41,26 @@ class MultiHeadAttention(nnx.Module):
             0, 2, 1, 3
         )
 
+    @jaxtyped(typechecker=beartype)
     def __call__(
         self,
-        x: Array,
-        key_padding_mask: Array | None = None,
-        attention_mask: Array | None = None,
-        cache: tuple[Array, Array] | None = None,
+        x: Float[Array, "B T {self.model_dim}"],
+        key_padding_mask: Bool[Array, "B K"] | None = None,
+        attention_mask: Bool[Array, "T K"] | None = None,
+        cache: tuple[
+            Float[Array, "B {self.num_heads} P {self.head_dim}"],
+            Float[Array, "B {self.num_heads} P {self.head_dim}"],
+        ]
+        | None = None,
         is_causal: bool = True,
         train: bool = True,
-    ) -> tuple[Array, tuple[Array, Array] | None]:
+    ) -> tuple[
+        Float[Array, "B T {self.model_dim}"],
+        tuple[
+            Float[Array, "B {self.num_heads} total_keys {self.head_dim}"],
+            Float[Array, "B {self.num_heads} total_keys {self.head_dim}"],
+        ],
+    ]:
         query_length = x.shape[1]
 
         q = self.q_projection(x)
