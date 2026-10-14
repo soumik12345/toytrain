@@ -39,7 +39,8 @@ class MultiHeadAttention(nnx.Module):
         self,
         model_dim: int,
         num_heads: int,
-        dropout_proba: float,
+        attention_weight_dropout_proba: float,
+        residual_dropout_proba: float,
         k_dim: int | None = None,
         v_dim: int | None = None,
         is_cross_attention: bool = False,
@@ -47,6 +48,13 @@ class MultiHeadAttention(nnx.Module):
         *,
         rngs: nnx.Rngs,
     ) -> None:
+        if model_dim <= 0 or num_heads <= 0:
+            raise ValueError("model_dim and num_heads must be positive.")
+        if model_dim % num_heads != 0:
+            raise ValueError(
+                f"model_dim ({model_dim}) must be divisible by num_heads ({num_heads})."
+            )
+
         self.model_dim = model_dim
         self.num_heads = num_heads
         self.head_dim = model_dim // num_heads
@@ -82,7 +90,10 @@ class MultiHeadAttention(nnx.Module):
         self.out_projection = nnx.Linear(
             self.model_dim, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
         )
-        self.dropout = nnx.Dropout(dropout_proba, rngs=rngs)
+        self.attention_weights_dropout = nnx.Dropout(
+            attention_weight_dropout_proba, rngs=rngs
+        )
+        self.residual_dropout = nnx.Dropout(residual_dropout_proba, rngs=rngs)
 
     def split_projection_across_heads(self, array: Array) -> Array:
         sequence_length = array.shape[1]
@@ -132,6 +143,12 @@ class MultiHeadAttention(nnx.Module):
             v = self.split_projection_across_heads(self.v_projection(value_input))
 
         return q, k, v
+
+    def safe_softmax(self, attention_scores: Array):
+        fully_masked = jnp.all(jnp.isneginf(attention_scores), axis=-1, keepdims=True)
+        safe_scores = jnp.where(fully_masked, 0.0, attention_scores)
+        attention_score_weights = nnx.softmax(safe_scores, axis=-1)
+        return jnp.where(fully_masked, 0.0, attention_score_weights)
 
     @jaxtyped(typechecker=beartype)
     def __call__(
@@ -187,8 +204,6 @@ class MultiHeadAttention(nnx.Module):
         if attention_mask is not None:
             attention_scores = jnp.where(attention_mask, -jnp.inf, attention_scores)
 
-        if is_causal is not None:
-            is_causal = not is_cross_attention_call
         if is_causal:
             causal_mask = jnp.triu(
                 jnp.full(
@@ -200,7 +215,10 @@ class MultiHeadAttention(nnx.Module):
             )
             attention_scores = attention_scores + causal_mask
 
-        attention_score_weights = nnx.softmax(attention_scores, axis=-1)
+        attention_score_weights = self.safe_softmax(attention_scores)
+        attention_score_weights = self.attention_weights_dropout(
+            attention_score_weights, deterministic=not train
+        )
 
         # (B, H, T, total_keys) @ (B, H, total_keys, D) -> (B, H, T, D)
         context = attention_score_weights @ v.astype(jnp.float32)
@@ -211,7 +229,7 @@ class MultiHeadAttention(nnx.Module):
             -1, query_length, self.model_dim
         )
         output = self.out_projection(context)
-        output = self.dropout(output, deterministic=not train)
+        output = self.residual_dropout(output, deterministic=not train)
 
         return output, cache
 
