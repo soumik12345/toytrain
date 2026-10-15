@@ -5,23 +5,29 @@ description = "A smol and scalable language model training framework"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "trackio>=0.35.0",
+    "beartype>=0.23.1",
+    "datasets>=5.1.0",
+    "flax>=0.10.7",
+    "grain>=0.2.13",
+    "jaxtyping>=0.3.7",
+    "optax>=0.2.8",
+    "orbax>=0.1.9",
+    "wandb>=0.30.0",
 ]
 
 [project.optional-dependencies]
 cpu = [
-    "torch>=2.13.0"
+    "jax",
 ]
-
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu" },
+cuda13 = [
+    "jax[cuda13]",
 ]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
+cuda12 = [
+    "jax[cuda12]",
+]
+tpu = [
+    "jax[tpu]",
+]
 
 [dependency-groups]
 dev = [
