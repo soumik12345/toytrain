@@ -9,6 +9,7 @@ from toytrain.models.attention.utils import (
     apply_l2_norm,
     safely_compute_attention_weights,
 )
+from toytrain.models.layers import RoPE
 
 MHA_KV_CACHE_TYPE = tuple[
     Float[Array, "B {self.num_heads} P {self.head_dim}"],
@@ -36,6 +37,7 @@ class MultiHeadAttention(nnx.Module):
         is_cross_attention: bool = False,
         dtype: jnp.dtype = jnp.float32,
         *,
+        rope_module: RoPE | nnx.Module | None = None,
         rngs: nnx.Rngs,
     ) -> None:
         if model_dim <= 0 or num_heads <= 0:
@@ -43,6 +45,10 @@ class MultiHeadAttention(nnx.Module):
         if model_dim % num_heads != 0:
             raise ValueError(
                 f"model_dim ({model_dim}) must be divisible by num_heads ({num_heads})."
+            )
+        if rope_module is not None and is_cross_attention:
+            raise ValueError(
+                f"Currently, rope_module is only supported with self-attention."
             )
 
         self.model_dim = model_dim
@@ -52,6 +58,7 @@ class MultiHeadAttention(nnx.Module):
         self.v_dim: int = v_dim if v_dim is not None else model_dim
         self.is_cross_attention = is_cross_attention
         self.qk_norm_init_length = qk_norm_init_length
+        self.rope_module = rope_module
 
         self.use_separate_projections = (
             is_cross_attention
@@ -116,11 +123,16 @@ class MultiHeadAttention(nnx.Module):
         k = self.split_projection_across_heads(k)
         v = self.split_projection_across_heads(v)
 
+        past_length = 0 if cache is None else cache[0].shape[2]
+
+        if self.rope_module is not None:
+            q = self.rope_module(q, position_offset=past_length)
+            k = self.rope_module(k, position_offset=past_length)
+
         # Normalize new keys once; cached keys are already normalized.
         if self.qk_norm_init_length is not None:
             k = apply_l2_norm(k)
 
-        past_length = 0
         if cache is not None:
             past_k, past_v = cache
             past_length = past_k.shape[2]
@@ -168,6 +180,10 @@ class MultiHeadAttention(nnx.Module):
         is_cross_attention_call = (
             self.is_cross_attention or key is not None or value is not None
         )
+        if self.rope_module is not None and is_cross_attention_call:
+            raise ValueError(
+                "Currently, rope_module is only supported with self-attention."
+            )
 
         # B -> Batch size
         # T -> Query length

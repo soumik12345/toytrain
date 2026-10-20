@@ -3,6 +3,7 @@ from beartype import beartype
 from flax import nnx
 from jaxtyping import Array, Bool, Float, jaxtyped
 
+from toytrain.models.layers import RoPE
 from toytrain.models.attention.utils import safely_compute_attention_weights
 
 GQA_KV_CACHE_TYPE = tuple[
@@ -28,6 +29,7 @@ class GroupedQueryAttention(nnx.Module):
         residual_dropout_proba: float,
         dtype: jnp.dtype = jnp.float32,
         *,
+        rope_module: RoPE | nnx.Module | None = None,
         rngs: nnx.Rngs,
     ) -> None:
         if model_dim <= 0 or num_heads <= 0:
@@ -49,6 +51,7 @@ class GroupedQueryAttention(nnx.Module):
         self.head_dim = model_dim // num_heads
         self.heads_per_dim = num_heads // num_groups
         self.kv_dim = num_groups * self.head_dim
+        self.rope_module = rope_module
 
         self.qkv_projection = nnx.Linear(
             self.model_dim,
@@ -99,6 +102,9 @@ class GroupedQueryAttention(nnx.Module):
         q = q.reshape(-1, query_length, self.num_heads, self.head_dim).transpose(
             0, 2, 1, 3
         )
+
+        past_length = 0 if cache is None else cache[0].shape[2]
+
         # (B, T, G * D) -> (B, T, G, D) -> (B, G, T, D)
         k = k.reshape(-1, query_length, self.num_groups, self.head_dim).transpose(
             0, 2, 1, 3
@@ -109,7 +115,10 @@ class GroupedQueryAttention(nnx.Module):
             0, 2, 1, 3
         )
 
-        past_length = 0
+        if self.rope_module is not None:
+            q = self.rope_module(q, position_offset=past_length)
+            k = self.rope_module(k, position_offset=past_length)
+
         if cache is not None:
             past_k, past_v = cache
             past_length = past_k.shape[2]

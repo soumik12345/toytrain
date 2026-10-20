@@ -1,6 +1,7 @@
 import jax.numpy as jnp
+from beartype import beartype
 from flax import nnx
-from jaxtyping import Array
+from jaxtyping import Array, Float, jaxtyped
 
 
 class RMSNorm(nnx.Module):
@@ -20,87 +21,57 @@ class RMSNorm(nnx.Module):
         return norm_x * self.gamma + self.beta
 
 
-class Embedding(nnx.Module):
-    def __init__(
-        self,
-        model_dim: int,
-        vocab_size: int,
-        dtype: jnp.dtype = jnp.float32,
-        *,
-        rngs: nnx.Rngs,
-    ) -> None:
-        self.model_dtype = dtype
-        self.embedding = nnx.Embed(
-            num_embeddings=vocab_size,
-            features=model_dim,
-            dtype=self.model_dtype,
-            rngs=rngs,
-        )
-        self.norm = RMSNorm(model_dim, dtype=self.model_dtype)
-
-    def __call__(self, x: Array, out: bool = False) -> Array:
-        return self.embedding.attend(self.norm(x)) if out else self.embedding(x)
-
-
-class FeedForwardNetwork(nnx.Module):
-    def __init__(
-        self,
-        model_dim: int,
-        feed_forward_dim: int,
-        dropout_proba: float,
-        dtype: jnp.dtype = jnp.float32,
-        *,
-        rngs: nnx.Rngs,
-    ) -> None:
-        self.up_projection = nnx.Linear(
-            model_dim, feed_forward_dim, dtype=dtype, rngs=rngs
-        )
-        self.down_projection = nnx.Linear(
-            feed_forward_dim, model_dim, dtype=dtype, rngs=rngs
-        )
-        self.dropout = nnx.Dropout(dropout_proba, rngs=rngs)
-
-    def __call__(self, x: Array, train: bool = True) -> Array:
-        x = self.up_projection(x)
-        x = nnx.gelu(x)
-        x = self.down_projection(x)
-        x = self.dropout(x, deterministic=not train)
-        return x
-
-
 class RoPE(nnx.Module):
     def __init__(
         self, sequence_len: int, model_dim: int, theta_base: float = 1e4
     ) -> None:
+        # (sequence_len, 1) -> [[1], [2], ... [sequence_len]]
         frequencies = jnp.arange(sequence_len, dtype=jnp.float32)[:, None] + 1
+
+        # (model_dim // 2, 1) -> [[0], [1], ..., [model_dim // 2 - 1]]
         positions = jnp.arange(model_dim // 2, dtype=jnp.float32)[:, None]
+
+        # (model_dim // 2, 1) -> (model_dim // 2, 2) -> (1, model_dim)
         positions = positions.repeat(2, axis=-1).reshape(1, -1)
+
+        # (1, model_dim)
         theta = jnp.exp(-2 * positions / model_dim * jnp.log(theta_base))
+
+        # (sequence_len, model_dim)
         self.cos = jnp.cos(frequencies * theta)
         self.sin = jnp.sin(frequencies * theta)
+
         self.model_dim = model_dim
 
-    def __call__(self, x: Array, position_offset: int) -> Array:
+    def validate(self, position_offset: int, position_end: int):
+        if position_offset < 0:
+            raise ValueError("position_offset must be non-negative.")
+        if position_end > self.cos.shape[0]:
+            raise ValueError(
+                f"RoPE position range [{position_offset}, {position_end}) exceeds "
+                f"the precomputed sequence length ({self.cos.shape[0]}). "
+                "Initialize RoPE with a larger sequence_len."
+            )
+
+    @jaxtyped(typechecker=beartype)
+    def __call__(
+        self, x: Float[Array, "*leading T {self.model_dim}"], position_offset: int
+    ) -> Float[Array, "*leading T {self.model_dim}"]:
         original_dtype = x.dtype
         x = x.astype(jnp.float32)
 
-        current_sequence_length = x.shape[1]
+        current_sequence_length = x.shape[-2]
+        position_end = position_offset + current_sequence_length
+        self.validate(position_offset, position_end)
 
-        rope_cosine_part = (
-            x * self.cos[position_offset : position_offset + current_sequence_length, :]
-        )
+        # (sequence_len, model_dim) -> (T, model_dim)
+        cosine_part = self.cos[position_offset:position_end]
+        sine_part = self.sin[position_offset:position_end]
 
-        x_inter = x.reshape((-1, current_sequence_length, self.model_dim // 2, 2))
-        x_inter_one = x_inter[..., 0]
-        x_inter_two = -1 * x_inter[..., 1]
-        x_inter = jnp.stack([x_inter_two, x_inter_one], axis=-1)
-        x_inter = x_inter.reshape((-1, current_sequence_length, self.model_dim))
+        # (..., T, model_dim // 2, 2)
+        pairs = x.reshape((*x.shape[:-1], self.model_dim // 2, 2))
 
-        rope_sine_part = (
-            x_inter
-            * self.sin[position_offset : position_offset + current_sequence_length, :]
-        )
+        # stack((..., T, model_dim // 2), (..., T, model_dim // 2)) -> (..., T, model_dim // 2, 2) -> (..., T, model_dim)
+        rotated = jnp.stack((-pairs[..., 1], pairs[..., 0]), axis=-1).reshape(x.shape)
 
-        x = rope_cosine_part + rope_sine_part
-        x = x.astype(original_dtype)
-        return x
+        return (x * cosine_part + rotated * sine_part).astype(original_dtype)
