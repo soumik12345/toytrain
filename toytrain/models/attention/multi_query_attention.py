@@ -73,16 +73,17 @@ class MultiQueryAttention(nnx.Module):
 
         # B -> Batch size
         # T -> Query length
-        # H -> Num heads
+        # K -> Total key/value length, including cached tokens
+        # H -> Number of query heads (num_heads)
         # C -> model_dim
-        # D -> Per head model_dim, i.e, model_dim // num_head
+        # D -> Dimension per head (model_dim // num_heads)
 
         # (B, T, C + 2D)
         qkv = self.qkv_projection(x)
 
         # q -> (B, T, C)
         # k -> (B, T, D)
-        # v ->(B, T, D)
+        # v -> (B, T, D)
         q, k, v = jnp.split(
             qkv, (self.model_dim, self.model_dim + self.head_dim), axis=-1
         )
@@ -105,9 +106,9 @@ class MultiQueryAttention(nnx.Module):
         cache = (k, v)
         total_key_length = k.shape[2]
 
-        # (B, 1, T, D)^T -> (B, 1, D, T)
+        # (B, 1, K, D) -> (B, 1, D, K)
         k_transpose = k.astype(jnp.float32).swapaxes(-1, -2)
-        # (B, H, T, D) @ (B, 1, D, T) -> (B, H, T, T)
+        # (B, H, T, D) @ (B, 1, D, K) -> (B, H, T, K)
         attention_scores = q.astype(jnp.float32) @ k_transpose
         attention_scores = attention_scores * (self.head_dim**-0.5)
 
@@ -129,6 +130,7 @@ class MultiQueryAttention(nnx.Module):
             )
             attention_scores = attention_scores + causal_mask
 
+        # Attention weights -> (B, H, T, K); softmax is over keys.
         attention_score_weights = safely_compute_attention_weights(attention_scores)
         attention_score_weights = self.attention_weights_dropout(
             attention_score_weights, deterministic=not train
