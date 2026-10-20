@@ -6,19 +6,27 @@ from jaxtyping import Array, Float, jaxtyped
 
 class RMSNorm(nnx.Module):
     def __init__(
-        self, model_dim: int, epsilon: float = 1e-6, dtype: jnp.dtype = jnp.float32
+        self,
+        model_dim: int,
+        use_bias: bool = True,
+        epsilon: float = 1e-6,
+        dtype: jnp.dtype = jnp.float32,
     ) -> None:
         self.epsilon = epsilon
+        self.use_bias = use_bias
         self.model_dtype = dtype
         self.gamma = nnx.Param(jnp.ones((1, 1, model_dim), dtype=self.model_dtype))
-        self.beta = nnx.Param(jnp.zeros((1, 1, model_dim), dtype=self.model_dtype))
+        if self.use_bias:
+            self.beta = nnx.Param(jnp.zeros((1, 1, model_dim), dtype=self.model_dtype))
 
     def __call__(self, x: Array) -> Array:
+        x = x.astype(jnp.float32)
         x_square = jnp.square(x)
         mean_x_square = jnp.mean(x_square, axis=-1, keepdims=True)
         root_mean_x_square = jnp.sqrt(mean_x_square + self.epsilon)
         norm_x = x / root_mean_x_square
-        return norm_x * self.gamma + self.beta
+        norm_x = norm_x * self.gamma
+        return norm_x + self.beta if self.use_bias else norm_x
 
 
 class RoPE(nnx.Module):

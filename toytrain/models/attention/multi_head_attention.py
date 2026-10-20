@@ -1,15 +1,12 @@
-import math
-
 import jax.numpy as jnp
 from beartype import beartype
 from flax import nnx
 from jaxtyping import Array, Bool, Float, jaxtyped
 
 from toytrain.models.attention.utils import (
-    apply_l2_norm,
     safely_compute_attention_weights,
 )
-from toytrain.models.layers import RoPE
+from toytrain.models.layers import RMSNorm, RoPE
 
 MHA_KV_CACHE_TYPE = tuple[
     Float[Array, "B {self.num_heads} P {self.head_dim}"],
@@ -33,7 +30,8 @@ class MultiHeadAttention(nnx.Module):
         residual_dropout_proba: float,
         k_dim: int | None = None,
         v_dim: int | None = None,
-        qk_norm_init_length: float | None = None,
+        use_qk_norm: bool = False,
+        use_rmsnorm_bias: bool = True,
         is_cross_attention: bool = False,
         dtype: jnp.dtype = jnp.float32,
         *,
@@ -57,7 +55,7 @@ class MultiHeadAttention(nnx.Module):
         self.k_dim = k_dim if k_dim is not None else model_dim
         self.v_dim: int = v_dim if v_dim is not None else model_dim
         self.is_cross_attention = is_cross_attention
-        self.qk_norm_init_length = qk_norm_init_length
+        self.use_qk_norm = use_qk_norm
         self.rope_module = rope_module
 
         self.use_separate_projections = (
@@ -85,16 +83,9 @@ class MultiHeadAttention(nnx.Module):
                 self.v_dim, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
             )
 
-        if self.qk_norm_init_length is not None:
-            if (
-                not math.isfinite(self.qk_norm_init_length)
-                or self.qk_norm_init_length <= 1
-            ):
-                raise ValueError("qk_norm_init_length must be finite and > 1.")
-            initial_scale = math.log2(self.qk_norm_init_length) + math.log2(
-                self.qk_norm_init_length - 1
-            )
-            self.qk_scale = nnx.Param(jnp.asarray(initial_scale, dtype=jnp.float32))
+        if self.use_qk_norm:
+            self.q_norm = RMSNorm(self.head_dim, use_rmsnorm_bias)
+            self.k_norm = RMSNorm(self.head_dim, use_rmsnorm_bias)
 
         self.out_projection = nnx.Linear(
             self.model_dim, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
@@ -123,15 +114,16 @@ class MultiHeadAttention(nnx.Module):
         k = self.split_projection_across_heads(k)
         v = self.split_projection_across_heads(v)
 
+        # Normalize new keys once, cached keys are already normalized.
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
         past_length = 0 if cache is None else cache[0].shape[2]
 
         if self.rope_module is not None:
             q = self.rope_module(q, position_offset=past_length)
             k = self.rope_module(k, position_offset=past_length)
-
-        # Normalize new keys once; cached keys are already normalized.
-        if self.qk_norm_init_length is not None:
-            k = apply_l2_norm(k)
 
         if cache is not None:
             past_k, past_v = cache
@@ -149,6 +141,8 @@ class MultiHeadAttention(nnx.Module):
         cache: MHA_KV_CACHE_TYPE | None,
     ):
         q = self.split_projection_across_heads(self.q_projection(x))
+        if self.use_qk_norm:
+            q = self.q_norm(q)
 
         if cache is not None:
             k, v = cache
@@ -159,8 +153,8 @@ class MultiHeadAttention(nnx.Module):
             value_input = value if value is not None else key_input
             k = self.split_projection_across_heads(self.k_projection(key_input))
             v = self.split_projection_across_heads(self.v_projection(value_input))
-            if self.qk_norm_init_length is not None:
-                k = apply_l2_norm(k)
+            if self.use_qk_norm:
+                k = self.k_norm(k)
 
         return q, k, v
 
@@ -212,9 +206,6 @@ class MultiHeadAttention(nnx.Module):
             q, k, v = self.cross_attention_prepare_qkv(x, key, value, cache)
             past_length = 0
 
-        if self.qk_norm_init_length is not None:
-            q = apply_l2_norm(q)
-
         cache = (k, v)
         total_key_length = k.shape[2]
 
@@ -222,11 +213,7 @@ class MultiHeadAttention(nnx.Module):
         k_transpose = k.astype(jnp.float32).swapaxes(-1, -2)
         # (B, H, T, D) @ (B, H, D, total_keys) -> (B, H, T, total_keys)
         attention_scores = q.astype(jnp.float32) @ k_transpose
-        attention_scores = (
-            attention_scores * self.qk_scale[...]
-            if self.qk_norm_init_length is not None
-            else attention_scores * (self.head_dim**-0.5)
-        )
+        attention_scores = attention_scores * (self.head_dim**-0.5)
 
         if key_padding_mask is not None:
             padding_mask = key_padding_mask.reshape(x.shape[0], 1, 1, total_key_length)
