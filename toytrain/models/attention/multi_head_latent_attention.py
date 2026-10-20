@@ -3,6 +3,7 @@ from flax import nnx
 from jaxtyping import Array, Bool, Float
 
 from toytrain.models.attention.utils import safely_compute_attention_weights
+from toytrain.models.layers import RMSNorm
 
 MHLA_KV_CACHE_TYPE = Float[Array, "B P {self.kv_lora_rank}"]
 
@@ -16,9 +17,12 @@ class MultiHeadLatentAttention(nnx.Module):
         self,
         model_dim: int,
         num_heads: int,
+        q_lora_rank: int,
         kv_lora_rank: int,
         attention_weight_dropout_proba: float,
         residual_dropout_proba: float,
+        use_qk_norm: bool = False,
+        use_rmsnorm_bias: bool = True,
         dtype: jnp.dtype = jnp.float32,
         *,
         rngs: nnx.Rngs,
@@ -33,13 +37,19 @@ class MultiHeadLatentAttention(nnx.Module):
         self.model_dim = model_dim
         self.num_heads = num_heads
         self.head_dim = model_dim // num_heads
+        self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.k_dim = model_dim
         self.v_dim = model_dim
+        self.use_qk_norm = use_qk_norm
 
-        self.q_projection = nnx.Linear(
-            self.model_dim, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
+        self.q_down_projection = nnx.Linear(
+            self.model_dim, self.q_lora_rank, use_bias=False, dtype=dtype, rngs=rngs
         )
+        self.q_up_projection = nnx.Linear(
+            self.q_lora_rank, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
+        )
+
         self.kv_down_projection = nnx.Linear(
             self.model_dim, self.kv_lora_rank, use_bias=False, dtype=dtype, rngs=rngs
         )
@@ -49,6 +59,10 @@ class MultiHeadLatentAttention(nnx.Module):
         self.v_up_projection = nnx.Linear(
             self.kv_lora_rank, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
         )
+        if self.use_qk_norm:
+            self.q_norm = RMSNorm(self.q_lora_rank, use_rmsnorm_bias)
+            self.kv_norm = RMSNorm(self.kv_lora_rank, use_rmsnorm_bias)
+
         self.out_projection = nnx.Linear(
             self.model_dim, self.model_dim, use_bias=False, dtype=dtype, rngs=rngs
         )
@@ -73,17 +87,24 @@ class MultiHeadLatentAttention(nnx.Module):
         # H -> Num query heads
         # D -> Per head model_dim, i.e, model_dim // num_heads
         # C -> model_dim
-        # R -> KV LoRA rank
+        # R_Q -> Q LoRA rank
+        # R_KV -> KV LoRA rank
 
-        # (B, T, C) -> (B, T, C) -> (B, T, H, D) -> (B, H, T, D)
-        q = (
-            self.q_projection(x)
-            .reshape(-1, query_length, self.num_heads, self.head_dim)
-            .transpose(0, 2, 1, 3)
-        )
+        # (B, T, C) -> (B, T, R_Q)
+        compressed_q = self.q_down_projection(x)
+        if self.use_qk_norm:
+            compressed_q = self.q_norm(compressed_q)
+        # (B, T, R_Q) -> (B, T, C)
+        q = self.q_up_projection(compressed_q)
+        # (B, T, C) -> (B, T, H, D)
+        q = q.reshape(-1, query_length, self.num_heads, self.head_dim)
+        # (B, T, H, D) -> (B, H, T, D)
+        q = q.transpose(0, 2, 1, 3)
 
-        # (B, T, C) -> (B, T, R)
+        # (B, T, C) -> (B, T, R_KV)
         compressed_kv = self.kv_down_projection(x)
+        if self.use_qk_norm:
+            compressed_kv = self.kv_norm(compressed_kv)
 
         past_length = 0
         if cache is not None:
@@ -95,7 +116,7 @@ class MultiHeadLatentAttention(nnx.Module):
 
         # K -> total key/value length = past_length + query_length
 
-        # (B, K, R) -> (B, K, C) -> (B, K, H, D) -> (B, H, K, D)
+        # (B, K, R_KV) -> (B, K, C) -> (B, K, H, D) -> (B, H, K, D)
         k = (
             self.k_up_projection(compressed_kv)
             .reshape(-1, total_key_length, self.num_heads, self.head_dim)
