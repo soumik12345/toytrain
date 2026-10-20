@@ -1,6 +1,7 @@
 import jax.numpy as jnp
+from beartype import beartype
 from flax import nnx
-from jaxtyping import Array, Bool, Float
+from jaxtyping import Array, Bool, Float, jaxtyped
 
 from toytrain.models.attention.utils import safely_compute_attention_weights
 
@@ -14,10 +15,7 @@ GQA_OUT_CACHE_TYPE = tuple[
     Float[Array, "B {self.num_groups} total_keys {self.head_dim}"],
 ]
 
-GQA_CALL_RETURN_TYPE = tuple[
-    Float[Array, "B T {self.model_dim}"],
-    GQA_OUT_CACHE_TYPE,
-]
+GQA_CALL_RETURN_TYPE = tuple[Float[Array, "B T {self.model_dim}"], GQA_OUT_CACHE_TYPE]
 
 
 class GroupedQueryAttention(nnx.Module):
@@ -68,6 +66,7 @@ class GroupedQueryAttention(nnx.Module):
         )
         self.residual_dropout = nnx.Dropout(residual_dropout_proba, rngs=rngs)
 
+    @jaxtyped(typechecker=beartype)
     def __call__(
         self,
         x: Float[Array, "B T {self.model_dim}"],

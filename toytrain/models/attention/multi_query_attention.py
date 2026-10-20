@@ -15,10 +15,7 @@ MQA_OUT_CACHE_TYPE = tuple[
     Float[Array, "B 1 total_keys {self.head_dim}"],
 ]
 
-MQA_CALL_RETURN_TYPE = tuple[
-    Float[Array, "B T {self.model_dim}"],
-    MQA_OUT_CACHE_TYPE,
-]
+MQA_CALL_RETURN_TYPE = tuple[Float[Array, "B T {self.model_dim}"], MQA_OUT_CACHE_TYPE]
 
 
 class MultiQueryAttention(nnx.Module):

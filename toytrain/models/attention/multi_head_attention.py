@@ -20,10 +20,7 @@ MHA_OUT_CACHE_TYPE = tuple[
     Float[Array, "B {self.num_heads} total_keys {self.head_dim}"],
 ]
 
-MHA_CALL_RETURN_TYPE = tuple[
-    Float[Array, "B T {self.model_dim}"],
-    MHA_OUT_CACHE_TYPE,
-]
+MHA_CALL_RETURN_TYPE = tuple[Float[Array, "B T {self.model_dim}"], MHA_OUT_CACHE_TYPE]
 
 
 class MultiHeadAttention(nnx.Module):
